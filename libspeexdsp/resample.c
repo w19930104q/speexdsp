@@ -140,6 +140,12 @@ struct SpeexResamplerState_ {
    spx_word16_t *sinc_table;
    spx_uint32_t sinc_table_length;
    resampler_basic_func resampler_ptr;
+   /* Whether the current sinc table is the per-phase "direct" table (1) or the
+      oversampled/interpolated table (0).  The two table families use slightly
+      different sub-sample alignments, so switching between them on a rate
+      change would jump the group delay; once streaming has started we keep the
+      family fixed to preserve phase continuity.  -1 = not chosen yet. */
+   int          use_direct_table;
 
    int    in_stride;
    int    out_stride;
@@ -609,6 +615,16 @@ static int update_filter(SpeexResamplerState *st)
    int use_direct;
    spx_uint32_t min_sinc_table_length;
    spx_uint32_t min_alloc_size;
+   /* Once the resampler has produced output, keep the filter length (and
+      hence the group delay and the mem layout) constant across rate changes.
+      Resizing the filter on the fly rearranges the delay line and jumps the
+      group delay, which injects a phase discontinuity every time the rate
+      changes (the audible "vibrato").  Instead we keep the delay line fixed
+      and only rebuild the sinc table/cutoff below.  The cutoff alone is enough
+      to adapt the anti-aliasing filter to the new ratio; the frozen length is
+      always at least as long as the base length, so downsampling quality does
+      not regress. */
+   int freeze_filter = st->started;
 
    st->int_advance = st->num_rate/st->den_rate;
    st->frac_advance = st->num_rate%st->den_rate;
@@ -619,10 +635,16 @@ static int update_filter(SpeexResamplerState *st)
    {
       /* down-sampling */
       st->cutoff = quality_map[st->quality].downsample_bandwidth * st->den_rate / st->num_rate;
-      if (multiply_frac(&st->filt_len,st->filt_len,st->num_rate,st->den_rate) != RESAMPLER_ERR_SUCCESS)
-         goto fail;
-      /* Round up to make sure we have a multiple of 8 for SSE */
-      st->filt_len = ((st->filt_len-1)&(~0x7))+8;
+      if (!freeze_filter)
+      {
+         if (multiply_frac(&st->filt_len,st->filt_len,st->num_rate,st->den_rate) != RESAMPLER_ERR_SUCCESS)
+            goto fail;
+         /* Round up to make sure we have a multiple of 8 for SSE */
+         st->filt_len = ((st->filt_len-1)&(~0x7))+8;
+      } else {
+         /* Keep the previously allocated filter length; only the cutoff changes. */
+         st->filt_len = old_length;
+      }
       if (2*st->den_rate < st->num_rate)
          st->oversample >>= 1;
       if (4*st->den_rate < st->num_rate)
@@ -636,6 +658,8 @@ static int update_filter(SpeexResamplerState *st)
    } else {
       /* up-sampling */
       st->cutoff = quality_map[st->quality].upsample_bandwidth;
+      if (freeze_filter)
+         st->filt_len = old_length;
    }
 
 #ifdef RESAMPLE_FULL_SINC_TABLE
@@ -643,10 +667,21 @@ static int update_filter(SpeexResamplerState *st)
    if (INT_MAX/sizeof(spx_word16_t)/st->den_rate < st->filt_len)
       goto fail;
 #else
-   /* Choose the resampling type that requires the least amount of memory */
-   use_direct = st->filt_len*st->den_rate <= st->filt_len*st->oversample+8
-                && INT_MAX/sizeof(spx_word16_t)/st->den_rate >= st->filt_len;
+   if (freeze_filter && st->use_direct_table != -1)
+   {
+      /* Keep the same table family as before.  The direct and interpolated
+         tables have different sub-sample alignments, so changing family on
+         the fly would discontinuously shift the group delay. */
+      use_direct = st->use_direct_table;
+      if (!use_direct && (INT_MAX/sizeof(spx_word16_t)-8)/st->oversample < st->filt_len)
+         goto fail;
+   } else {
+      /* Choose the resampling type that requires the least amount of memory */
+      use_direct = st->filt_len*st->den_rate <= st->filt_len*st->oversample+8
+                   && INT_MAX/sizeof(spx_word16_t)/st->den_rate >= st->filt_len;
+   }
 #endif
+   st->use_direct_table = use_direct;
    if (use_direct)
    {
       min_sinc_table_length = st->filt_len*st->den_rate;
@@ -724,7 +759,7 @@ static int update_filter(SpeexResamplerState *st)
       for (i=0;i<st->nb_channels*st->mem_alloc_size;i++)
          st->mem[i] = 0;
       /*speex_warning("reinit filter");*/
-   } else if (st->filt_len > old_length)
+   } else if (!freeze_filter && st->filt_len > old_length)
    {
       spx_uint32_t i;
       /* Increase the filter length */
@@ -766,7 +801,7 @@ static int update_filter(SpeexResamplerState *st)
             st->magic_samples[i] = magic_samples;
          }
       }
-   } else if (st->filt_len < old_length)
+   } else if (!freeze_filter && st->filt_len < old_length)
    {
       spx_uint32_t i;
       /* Reduce filter length, this a bit tricky. We need to store some of the memory as "magic"
@@ -829,6 +864,7 @@ EXPORT SpeexResamplerState *speex_resampler_init_frac(spx_uint32_t nb_channels, 
    st->filt_len = 0;
    st->mem = 0;
    st->resampler_ptr = 0;
+   st->use_direct_table = -1;
 
    st->cutoff = 1.f;
    st->nb_channels = nb_channels;
@@ -1134,8 +1170,18 @@ EXPORT int speex_resampler_set_rate_frac(SpeexResamplerState *st, spx_uint32_t r
    {
       for (i=0;i<st->nb_channels;i++)
       {
-         if (multiply_frac(&st->samp_frac_num[i],st->samp_frac_num[i],st->den_rate,old_den) != RESAMPLER_ERR_SUCCESS)
-            return RESAMPLER_ERR_OVERFLOW;
+         /* Rescale the fractional phase from the old denominator to the new
+            one.  The previous implementation used multiply_frac(), which
+            truncates the result and therefore loses up to almost one full
+            sub-sample of phase on every rate change; the lost fractions
+            accumulate across successive changes and make the output phase
+            drift.  Use 64-bit arithmetic with rounding instead so the
+            continuous input phase (samp_frac_num/old_den) is preserved to
+            within half a new-denominator step, with no systematic bias.
+            The products fit in 64 bits because every operand is < 2^32. */
+         unsigned long long prod = (unsigned long long)st->samp_frac_num[i] * st->den_rate
+                             + (unsigned long long)old_den / 2u;
+         st->samp_frac_num[i] = (spx_uint32_t)(prod / old_den);
          /* Safety net */
          if (st->samp_frac_num[i] >= st->den_rate)
             st->samp_frac_num[i] = st->den_rate-1;
