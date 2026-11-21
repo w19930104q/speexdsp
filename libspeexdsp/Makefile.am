@@ -44,3 +44,27 @@ testresample_LDADD = libspeexdsp.la @FFT_LIBS@ @LIBM@
 testresample2_SOURCES = testresample2.c
 testresample2_LDADD = libspeexdsp.la @FFT_LIBS@ @LIBM@
 endif
+
+# Resampler consistency regression (interleaved vs mono, fixed vs float,
+# edge safety, reset_mem, magic samples). Run by make check.
+#
+# libtestalt.la recompiles resample.c standalone in the OPPOSITE arithmetic
+# mode from the library, so fixed-point and floating-point can be compared
+# inside a single test binary. It must be built without HAVE_CONFIG_H
+# (config.h would select the library's own arithmetic), so it gets its own
+# CPPFLAGS instead of AM_CPPFLAGS.
+if FIXED_POINT
+ALT_ARITH = -DFLOATING_POINT
+else
+ALT_ARITH = -DFIXED_POINT
+endif
+
+TESTS = testresample_consistency
+check_PROGRAMS = testresample_consistency
+check_LTLIBRARIES = libtestalt.la
+
+libtestalt_la_SOURCES = resample_alt.c
+libtestalt_la_CPPFLAGS = -UHAVE_CONFIG_H -I$(top_srcdir)/include/speex $(ALT_ARITH)
+
+testresample_consistency_SOURCES = testresample_consistency.c testresample_alt.c testresample_alt.h
+testresample_consistency_LDADD = libtestalt.la libspeexdsp.la @FFT_LIBS@ @LIBM@

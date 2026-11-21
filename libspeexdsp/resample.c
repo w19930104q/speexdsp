@@ -1213,12 +1213,17 @@ EXPORT int speex_resampler_reset_mem(SpeexResamplerState *st)
    spx_uint32_t i;
    for (i=0;i<st->nb_channels;i++)
    {
+      spx_uint32_t j;
       st->last_sample[i] = 0;
       st->magic_samples[i] = 0;
       st->samp_frac_num[i] = 0;
+      /* Each channel's filter history lives at mem + i*mem_alloc_size, so
+         it must be cleared per channel. Clearing nb_channels*(filt_len-1)
+         contiguous samples only covers channel 0 (mem_alloc_size is
+         filt_len-1 + buffer_size), leaving stale history in channels >= 1. */
+      for (j=0;j<st->filt_len-1;j++)
+         st->mem[i*st->mem_alloc_size+j] = 0;
    }
-   for (i=0;i<st->nb_channels*(st->filt_len-1);i++)
-      st->mem[i] = 0;
    return RESAMPLER_ERR_SUCCESS;
 }
 

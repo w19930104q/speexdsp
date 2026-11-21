@@ -149,10 +149,12 @@ AC_ARG_ENABLE(fixed-point, [  --enable-fixed-point    Compile as fixed-point],
   FFT=kiss
   has_sse=no
   AC_DEFINE([FIXED_POINT], , [Compile as fixed-point])
+  fixed_point=yes
 else
   AC_DEFINE([FLOATING_POINT], , [Compile as floating-point])
 fi],
 AC_DEFINE([FLOATING_POINT], , [Compile as floating-point]))
+AM_CONDITIONAL([FIXED_POINT], [test "x$fixed_point" = xyes])
 
 if test "$has_sse" = yes; then
   AC_DEFINE([USE_SSE], , [Enable SSE support])
