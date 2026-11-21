@@ -1,3 +1,16 @@
+2026-11-21  SpeexDSP contributors
+
+	* include/speex/speex_preprocess.h:
+	* libspeexdsp/preprocess.c:
+	  Add SPEEX_PREPROCESS_SET_AGC_GAIN_LINEAR and
+	  SPEEX_PREPROCESS_GET_AGC_GAIN_LINEAR controls to set/read the
+	  current AGC gain directly as a linear amplitude factor. The set
+	  gain applies to the next frame, after which normal AGC adaptation
+	  resumes under the existing increment/decrement step and maximum
+	  gain constraints. Floating-point builds only.
+	* libspeexdsp/testagc.c, libspeexdsp/Makefile.am:
+	  Add testagc unit test to the make check target.
+
 2005-09-07  Thomas Vander Stichele  <thomas at apestaart dot org>
 
 	* libspeex/cb_search.c: (split_cb_search_shape_sign_N1):

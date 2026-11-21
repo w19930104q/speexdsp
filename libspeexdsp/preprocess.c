@@ -237,6 +237,8 @@ struct SpeexPreprocessState_ {
    float  max_decrease_step; /**< Maximum decrease in gain from one frame to another */
    float  prev_loudness;     /**< Loudness of previous frame */
    float  init_max;          /**< Current gain limit during initialisation */
+   int    agc_gain_forced;   /**< Next frame must use agc_gain as-is, skipping AGC adaptation */
+   float  agc_gain_forced_ratio; /**< Total gain change pending for the overlap buffer */
 #endif
    int    nb_adapt;          /**< Number of frames used for adaptation so far */
    int    was_speech;
@@ -516,6 +518,8 @@ EXPORT SpeexPreprocessState *speex_preprocess_state_init(int frame_size, int sam
    st->max_decrease_step = exp(-0.11513f * 40.*st->frame_size / st->sampling_rate);
    st->prev_loudness = 1;
    st->init_max = 1;
+   st->agc_gain_forced = 0;
+   st->agc_gain_forced_ratio = 1.f;
 #endif
    st->was_speech = 0;
 
@@ -566,6 +570,7 @@ static void speex_compute_agc(SpeexPreprocessState *st, spx_word16_t Pframe, spx
 {
    int i;
    int N = st->ps_size;
+   int N3 = 2*N - st->frame_size;
    float target_gain;
    float loudness=1.f;
    float rate;
@@ -590,23 +595,59 @@ static void speex_compute_agc(SpeexPreprocessState *st, spx_word16_t Pframe, spx
 
    target_gain = AMP_SCALE*st->agc_level*pow(st->loudness/(1e-4+st->loudness_accum), -1.0f/LOUDNESS_EXP);
 
-   if ((Pframe>.5  && st->nb_adapt > 20) || target_gain < st->agc_gain)
+   if (st->agc_gain_forced)
    {
-      if (target_gain > st->max_increase_step*st->agc_gain)
-         target_gain = st->max_increase_step*st->agc_gain;
-      if (target_gain < st->max_decrease_step*st->agc_gain && loudness < 10*st->prev_loudness)
-         target_gain = st->max_decrease_step*st->agc_gain;
-      if (target_gain > st->max_gain)
-         target_gain = st->max_gain;
-      if (target_gain > st->init_max)
-         target_gain = st->init_max;
+      /* The current gain has been set directly through
+         SPEEX_PREPROCESS_SET_AGC_GAIN_LINEAR: apply it to this frame as-is and
+         skip the usual AGC adaptation. The overlap-add history is rescaled by
+         the total gain change since the last processed frame (accumulated in
+         agc_gain_forced_ratio, which also handles repeated sets) so that the
+         change takes effect on every output sample of the next frame instead
+         of being cross-faded over one frame. A zero gain clears the whole
+         synthesis buffer instead of multiplying by zero, so no zero-valued
+         history can leak into a later frame when gain is restored.
+         Adaptation (with its step and maximum gain constraints) resumes on the
+         following frame. */
+      if (st->agc_gain == 0.f)
+      {
+         /* Mute both the current synthesis frame and the overlap-add
+            history, so muting is instantaneous and leaves no residual
+            signal for later frames. When gain is later restored, standard
+            overlap-add naturally fades the signal back in over one frame. */
+         for (i=0;i<2*N;i++)
+            ft[i] = 0;
+         for (i=0;i<N3;i++)
+            st->outbuf[i] = 0;
+      } else {
+         if (st->agc_gain_forced_ratio != 1.f)
+         {
+            for (i=0;i<N3;i++)
+               st->outbuf[i] *= st->agc_gain_forced_ratio;
+         }
+         for (i=0;i<2*N;i++)
+            ft[i] *= st->agc_gain;
+      }
+      st->agc_gain_forced = 0;
+      st->agc_gain_forced_ratio = 1.f;
+   } else {
+      if ((Pframe>.5  && st->nb_adapt > 20) || target_gain < st->agc_gain)
+      {
+         if (target_gain > st->max_increase_step*st->agc_gain)
+            target_gain = st->max_increase_step*st->agc_gain;
+         if (target_gain < st->max_decrease_step*st->agc_gain && loudness < 10*st->prev_loudness)
+            target_gain = st->max_decrease_step*st->agc_gain;
+         if (target_gain > st->max_gain)
+            target_gain = st->max_gain;
+         if (target_gain > st->init_max)
+            target_gain = st->init_max;
 
-      st->agc_gain = target_gain;
+         st->agc_gain = target_gain;
+      }
+      /*fprintf (stderr, "%f %f %f\n", loudness, (float)AMP_SCALE_1*pow(st->loudness, 1.0f/LOUDNESS_EXP), st->agc_gain);*/
+
+      for (i=0;i<2*N;i++)
+         ft[i] *= st->agc_gain;
    }
-   /*fprintf (stderr, "%f %f %f\n", loudness, (float)AMP_SCALE_1*pow(st->loudness, 1.0f/LOUDNESS_EXP), st->agc_gain);*/
-
-   for (i=0;i<2*N;i++)
-      ft[i] *= st->agc_gain;
    st->prev_loudness = loudness;
 }
 #endif
@@ -1201,6 +1242,35 @@ EXPORT int speex_preprocess_ctl(SpeexPreprocessState *state, int request, void *
    case SPEEX_PREPROCESS_GET_AGC_TARGET:
       (*(spx_int32_t*)ptr) = st->agc_level;
       break;
+#ifndef DISABLE_FLOAT_API
+   case SPEEX_PREPROCESS_SET_AGC_GAIN_LINEAR:
+   {
+      float gain = (*(float*)ptr);
+      float ratio;
+      /* Clamp negatives and NaNs to zero; max_gain remains a hard upper
+         bound, including for a forced gain */
+      if (!(gain>=0.f))
+         gain = 0.f;
+      if (gain > st->max_gain)
+         gain = st->max_gain;
+      if (gain > 0.f)
+      {
+         /* Accumulate the gain ratio in case the gain is set again before
+            the pending forced gain has been consumed by the next frame.
+            A zero gain clears the synthesis buffer without touching the
+            history, so its ratio is simply ignored. */
+         ratio = gain/st->agc_gain;
+         if (isfinite(ratio))
+            st->agc_gain_forced_ratio *= ratio;
+      }
+      st->agc_gain = gain;
+      st->agc_gain_forced = 1;
+      break;
+   }
+   case SPEEX_PREPROCESS_GET_AGC_GAIN_LINEAR:
+      (*(float*)ptr) = st->agc_gain;
+      break;
+#endif /* #ifndef DISABLE_FLOAT_API */
 #endif
    default:
       speex_warning_int("Unknown speex_preprocess_ctl request: ", request);

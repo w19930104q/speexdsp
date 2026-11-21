@@ -30,6 +30,8 @@ include/speex/speexdsp_config_types.h
 testdenoise
 testecho
 testjitter
+testagc
+test-driver
 libtool
 speexdsp.pc
 stamp-*

@@ -211,6 +211,16 @@ int speex_preprocess_ctl(SpeexPreprocessState *st, int request, void *ptr);
 /** Get preprocessor Automatic Gain Control level (int32) */
 #define SPEEX_PREPROCESS_GET_AGC_TARGET 47
 
+/** Set current AGC gain directly as a linear amplitude factor (float, 1.0 =
+ * unity). The gain is applied to the next frame and the AGC then keeps
+ * adapting from that value, subject to the usual increment/decrement step and
+ * maximum gain constraints. Floating-point builds only. */
+#define SPEEX_PREPROCESS_SET_AGC_GAIN_LINEAR 48
+/** Get current AGC gain as a linear amplitude factor (float, 1.0 = unity).
+ * This is the gain actually applied to (or about to be applied to) the audio.
+ * Floating-point builds only. */
+#define SPEEX_PREPROCESS_GET_AGC_GAIN_LINEAR 49
+
 #ifdef __cplusplus
 }
 #endif

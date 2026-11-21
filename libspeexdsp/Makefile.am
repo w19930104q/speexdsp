@@ -32,7 +32,7 @@ libspeexdsp_la_LDFLAGS = -no-undefined -version-info @SPEEXDSP_LT_CURRENT@:@SPEE
 libspeexdsp_la_LIBADD = $(LIBM)
 
 if BUILD_EXAMPLES
-noinst_PROGRAMS = testdenoise testecho testjitter testresample testresample2
+noinst_PROGRAMS = testdenoise testecho testjitter testresample testresample2 testagc
 testdenoise_SOURCES = testdenoise.c
 testdenoise_LDADD = libspeexdsp.la @FFT_LIBS@
 testecho_SOURCES = testecho.c
@@ -43,4 +43,9 @@ testresample_SOURCES = testresample.c
 testresample_LDADD = libspeexdsp.la @FFT_LIBS@ @LIBM@
 testresample2_SOURCES = testresample2.c
 testresample2_LDADD = libspeexdsp.la @FFT_LIBS@ @LIBM@
+testagc_SOURCES = testagc.c
+testagc_LDADD = libspeexdsp.la @FFT_LIBS@ @LIBM@
+
+check_PROGRAMS = testagc
+TESTS = testagc
 endif

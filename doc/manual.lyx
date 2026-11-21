@@ -907,6 +907,23 @@ Automatic gain control (AGC) is a feature that deals with the fact that
 \end_layout
 
 \begin_layout Standard
+The AGC normally converges towards its target level gradually, with the
+ configurable increment/decrement rates and maximum gain acting as constraints
+ on the per-frame gain change.
+ For applications that need to move the gain instantly, such as raising or
+ lowering it during silence segments or jumping to a known gain when an event
+ occurs, the preprocessor also exposes the current gain directly.
+ SPEEX_PREPROCESS_SET_AGC_GAIN_LINEAR sets the AGC gain as a linear amplitude
+ factor (1.0 means unity, 2.0 doubles the amplitude) and the new gain takes
+ effect on the very next audio frame; from then on the AGC keeps adapting
+ normally, still respecting the configured step and maximum gain constraints.
+ SPEEX_PREPROCESS_GET_AGC_GAIN_LINEAR reads back the gain currently in use.
+ Both controls use a float argument and are only available in floating-point
+ builds; a gain of zero mutes the signal and values above the maximum gain are
+ clamped.
+\end_layout
+
+\begin_layout Standard
 The voice activity detector (VAD) provided by the preprocessor is more advanced
  than the one directly provided in the codec.
  
@@ -4245,6 +4262,42 @@ SPEEX_PREPROCESS_SET_AGC_LEVEL
 
 \begin_layout Description
 SPEEX_PREPROCESS_GET_AGC_LEVEL
+\end_layout
+
+\begin_layout Description
+SPEEX_PREPROCESS_SET_AGC_GAIN_LINEAR Set the current AGC gain directly as a
+ linear amplitude factor (
+\begin_inset listings
+inline true
+status collapsed
+
+\begin_layout Plain Layout
+
+float
+\end_layout
+
+\end_inset
+
+, 1.0 = unity). The gain is applied to the next frame; the AGC then keeps
+ adapting subject to the step and maximum gain constraints. Floating-point
+ builds only.
+\end_layout
+
+\begin_layout Description
+SPEEX_PREPROCESS_GET_AGC_GAIN_LINEAR Get the current AGC gain as a linear
+ amplitude factor (
+\begin_inset listings
+inline true
+status collapsed
+
+\begin_layout Plain Layout
+
+float
+\end_layout
+
+\end_inset
+
+). Floating-point builds only.
 \end_layout
 
 \begin_layout Description
