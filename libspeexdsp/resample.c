@@ -88,6 +88,21 @@ static void speex_free(void *ptr) {free(ptr);}
 #define IMAX(a,b) ((a) > (b) ? (a) : (b))
 #define IMIN(a,b) ((a) < (b) ? (a) : (b))
 
+/* Returns true when the strided output buffer cannot hold another output
+   frame. The inner resamplers write channel data at
+   out[out_stride * out_sample], so the number of complete frames that fit
+   in "out_len" addressable elements is out_len / out_stride (rounded down).
+   For out_stride == 1 the capacity is just out_len, which makes the
+   condition identical to the original single-channel test, keeping the
+   planar path bit-for-bit unchanged. */
+static inline int output_limit_reached(spx_uint32_t out_sample, spx_uint32_t out_len, int out_stride)
+{
+   spx_uint32_t frame_capacity = (out_stride <= 1)
+      ? out_len
+      : out_len / (spx_uint32_t)out_stride;
+   return out_sample >= frame_capacity;
+}
+
 #ifndef NULL
 #define NULL 0
 #endif
@@ -341,7 +356,7 @@ static int resampler_basic_direct_single(SpeexResamplerState *st, spx_uint32_t c
    const spx_uint32_t den_rate = st->den_rate;
    spx_word32_t sum;
 
-   while (!(last_sample >= (spx_int32_t)*in_len || out_sample >= (spx_int32_t)*out_len))
+   while (!(last_sample >= (spx_int32_t)*in_len || output_limit_reached((spx_uint32_t)out_sample, *out_len, out_stride)))
    {
       const spx_word16_t *sinct = & sinc_table[samp_frac_num*N];
       const spx_word16_t *iptr = & in[last_sample];
@@ -399,7 +414,7 @@ static int resampler_basic_direct_double(SpeexResamplerState *st, spx_uint32_t c
    const spx_uint32_t den_rate = st->den_rate;
    double sum;
 
-   while (!(last_sample >= (spx_int32_t)*in_len || out_sample >= (spx_int32_t)*out_len))
+   while (!(last_sample >= (spx_int32_t)*in_len || output_limit_reached((spx_uint32_t)out_sample, *out_len, out_stride)))
    {
       const spx_word16_t *sinct = & sinc_table[samp_frac_num*N];
       const spx_word16_t *iptr = & in[last_sample];
@@ -447,7 +462,7 @@ static int resampler_basic_interpolate_single(SpeexResamplerState *st, spx_uint3
    const spx_uint32_t den_rate = st->den_rate;
    spx_word32_t sum;
 
-   while (!(last_sample >= (spx_int32_t)*in_len || out_sample >= (spx_int32_t)*out_len))
+   while (!(last_sample >= (spx_int32_t)*in_len || output_limit_reached((spx_uint32_t)out_sample, *out_len, out_stride)))
    {
       const spx_word16_t *iptr = & in[last_sample];
 
@@ -510,7 +525,7 @@ static int resampler_basic_interpolate_double(SpeexResamplerState *st, spx_uint3
    const spx_uint32_t den_rate = st->den_rate;
    spx_word32_t sum;
 
-   while (!(last_sample >= (spx_int32_t)*in_len || out_sample >= (spx_int32_t)*out_len))
+   while (!(last_sample >= (spx_int32_t)*in_len || output_limit_reached((spx_uint32_t)out_sample, *out_len, out_stride)))
    {
       const spx_word16_t *iptr = & in[last_sample];
 
@@ -573,7 +588,7 @@ static int resampler_basic_zero(SpeexResamplerState *st, spx_uint32_t channel_in
    const spx_uint32_t den_rate = st->den_rate;
 
    (void)in;
-   while (!(last_sample >= (spx_int32_t)*in_len || out_sample >= (spx_int32_t)*out_len))
+   while (!(last_sample >= (spx_int32_t)*in_len || output_limit_reached((spx_uint32_t)out_sample, *out_len, out_stride)))
    {
       out[out_stride * out_sample++] = 0;
       last_sample += int_advance;
@@ -888,7 +903,9 @@ static int speex_resampler_process_native(SpeexResamplerState *st, spx_uint32_t 
 
    st->started = 1;
 
-   /* Call the right resampler through the function ptr */
+   /* Call the right resampler through the function ptr. *out_len is a frame
+      count; the inner loops convert it to a safe strided bound via
+      output_limit_reached(). */
    out_sample = st->resampler_ptr(st, channel_index, mem, in_len, out, out_len);
 
    if (st->last_sample[channel_index] < (spx_int32_t)*in_len)
@@ -937,6 +954,10 @@ EXPORT int speex_resampler_process_float(SpeexResamplerState *st, spx_uint32_t c
    const int filt_offs = st->filt_len - 1;
    const spx_uint32_t xlen = st->mem_alloc_size - filt_offs;
    const int istride = st->in_stride;
+   /* olen/ochunk are frame counts. The output pointer advances by the
+      element stride for each frame; with stride == 1 frames and elements
+      coincide, which is the original planar behaviour. */
+   const int ostride = st->out_stride;
 
    if (st->magic_samples[channel_index])
       olen -= speex_resampler_magic(st, channel_index, &out, olen);
@@ -955,9 +976,15 @@ EXPORT int speex_resampler_process_float(SpeexResamplerState *st, spx_uint32_t c
         speex_resampler_process_native(st, channel_index, &ichunk, out, &ochunk);
         ilen -= ichunk;
         olen -= ochunk;
-        out += ochunk * st->out_stride;
+        out += ochunk * ostride;
         if (in)
            in += ichunk * istride;
+        /* A strided output buffer may be smaller than one filter's worth of
+           frames, so the inner resampler can consume nothing and produce
+           nothing during filter warm-up. Bail out instead of looping
+           forever; the caller retries with more output room. */
+        if (ichunk == 0 && ochunk == 0)
+           break;
       }
    }
    *in_len -= ilen;
@@ -1030,6 +1057,9 @@ EXPORT int speex_resampler_process_int(SpeexResamplerState *st, spx_uint32_t cha
      out += (ochunk+omagic) * ostride_save;
      if (in)
        in += ichunk * istride_save;
+     /* Guard against a no-progress iteration (see process_float above). */
+     if (ichunk == 0 && ochunk == 0 && omagic == 0)
+       break;
    }
    st->out_stride = ostride_save;
    *in_len -= ilen;
@@ -1044,20 +1074,36 @@ EXPORT int speex_resampler_process_interleaved_float(SpeexResamplerState *st, co
    int istride_save, ostride_save;
    spx_uint32_t bak_out_len = *out_len;
    spx_uint32_t bak_in_len = *in_len;
+   spx_uint32_t common_in_len = bak_in_len;
+   spx_uint32_t common_out_len = bak_out_len;
    istride_save = st->in_stride;
    ostride_save = st->out_stride;
    st->in_stride = st->out_stride = st->nb_channels;
    for (i=0;i<st->nb_channels;i++)
    {
-      *out_len = bak_out_len;
-      *in_len = bak_in_len;
+      /* Give every channel the same, full frame budget. Each channel
+         addresses the interleaved buffers through its own offset and the
+         inter-channel stride; the inner loops bound their writes by the
+         frame capacity, so no channel can run out of bounds. Per-channel
+         counters keep the channels' independent state progression intact. */
+      spx_uint32_t chan_in_len = bak_in_len;
+      spx_uint32_t chan_out_len = bak_out_len;
       if (in != NULL)
-         speex_resampler_process_float(st, i, in+i, in_len, out+i, out_len);
+         speex_resampler_process_float(st, i, in+i, &chan_in_len, out+i, &chan_out_len);
       else
-         speex_resampler_process_float(st, i, NULL, in_len, out+i, out_len);
+         speex_resampler_process_float(st, i, NULL, &chan_in_len, out+i, &chan_out_len);
+      /* All channels must consume/produce the same number of frames. Report
+         the minimum so the caller advances only as far as every channel did;
+         any leftover frames are reprocessed on the next call. */
+      if (chan_in_len < common_in_len)
+         common_in_len = chan_in_len;
+      if (chan_out_len < common_out_len)
+         common_out_len = chan_out_len;
    }
    st->in_stride = istride_save;
    st->out_stride = ostride_save;
+   *in_len = common_in_len;
+   *out_len = common_out_len;
    return st->resampler_ptr == resampler_basic_zero ? RESAMPLER_ERR_ALLOC_FAILED : RESAMPLER_ERR_SUCCESS;
 }
 
@@ -1067,20 +1113,36 @@ EXPORT int speex_resampler_process_interleaved_int(SpeexResamplerState *st, cons
    int istride_save, ostride_save;
    spx_uint32_t bak_out_len = *out_len;
    spx_uint32_t bak_in_len = *in_len;
+   spx_uint32_t common_in_len = bak_in_len;
+   spx_uint32_t common_out_len = bak_out_len;
    istride_save = st->in_stride;
    ostride_save = st->out_stride;
    st->in_stride = st->out_stride = st->nb_channels;
    for (i=0;i<st->nb_channels;i++)
    {
-      *out_len = bak_out_len;
-      *in_len = bak_in_len;
+      /* Give every channel the same, full frame budget. Each channel
+         addresses the interleaved buffers through its own offset and the
+         inter-channel stride; the inner loops bound their writes by the
+         frame capacity, so no channel can run out of bounds. Per-channel
+         counters keep the channels' independent state progression intact. */
+      spx_uint32_t chan_in_len = bak_in_len;
+      spx_uint32_t chan_out_len = bak_out_len;
       if (in != NULL)
-         speex_resampler_process_int(st, i, in+i, in_len, out+i, out_len);
+         speex_resampler_process_int(st, i, in+i, &chan_in_len, out+i, &chan_out_len);
       else
-         speex_resampler_process_int(st, i, NULL, in_len, out+i, out_len);
+         speex_resampler_process_int(st, i, NULL, &chan_in_len, out+i, &chan_out_len);
+      /* All channels must consume/produce the same number of frames. Report
+         the minimum so the caller advances only as far as every channel did;
+         any leftover frames are reprocessed on the next call. */
+      if (chan_in_len < common_in_len)
+         common_in_len = chan_in_len;
+      if (chan_out_len < common_out_len)
+         common_out_len = chan_out_len;
    }
    st->in_stride = istride_save;
    st->out_stride = ostride_save;
+   *in_len = common_in_len;
+   *out_len = common_out_len;
    return st->resampler_ptr == resampler_basic_zero ? RESAMPLER_ERR_ALLOC_FAILED : RESAMPLER_ERR_SUCCESS;
 }
 
