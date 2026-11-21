@@ -4997,12 +4997,37 @@ typedef struct {
 
 \begin_layout Plain Layout
 
-} JitterBufferPacket; 
+   spx_uint16_t sequence;   /* RTP Sequence number if available (0 otherwise)
+ */
+\end_layout
+
+\begin_layout Plain Layout
+
+   spx_uintptr_t user_data; /* Opaque user data, wide enough to hold a pointer
+ */
+\end_layout
+
+\begin_layout Plain Layout
+
+} JitterBufferPacket;
 \end_layout
 
 \end_inset
 
 
+\end_layout
+
+\begin_layout Standard
+The jitter buffer never copies, frees, or takes ownership of the memory pointed
+ to by the data field.
+ The caller keeps ownership of that buffer and must keep it valid from
+ jitter_buffer_put() until the packet has been retrieved with jitter_buffer_get()
+ (or discarded with jitter_buffer_reset()/jitter_buffer_destroy()).
+ When a packet is retrieved, the same data pointer that was passed in is
+ returned (zero-copy).
+ The user_data field is copied verbatim by the jitter buffer and otherwise
+ ignored; it has the same width as a pointer, so a pointer can be stored in
+ it on both 32-bit and 64-bit platforms.
 \end_layout
 
 \begin_layout Standard

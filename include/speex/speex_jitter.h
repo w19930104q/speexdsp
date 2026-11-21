@@ -56,14 +56,34 @@ typedef struct JitterBuffer_ JitterBuffer;
 /** Definition of an incoming packet */
 typedef struct _JitterBufferPacket JitterBufferPacket;
 
-/** Definition of an incoming packet */
+/** Definition of an incoming packet.
+
+    Compatibility note: the user_data field was widened from spx_uint32_t to
+    spx_uintptr_t (an unsigned integer type with the same width as a pointer)
+    so that a pointer can be stored in it without truncation on 64-bit
+    platforms. On 32-bit platforms the field is still 32 bits wide and the
+    layout is unchanged. On 64-bit platforms the struct layout changes, so
+    all code using JitterBufferPacket must be recompiled against this header;
+    source code that only stores 32-bit values in user_data continues to work
+    unmodified (values are zero-extended). Callers that do not use a field
+    should initialise it to 0.
+
+    Ownership of the data buffer: the jitter buffer NEVER copies, frees, or
+    otherwise takes ownership of the memory pointed to by the data field.
+    The caller retains ownership of the buffer at all times and must keep it
+    valid from jitter_buffer_put() until the packet has been retrieved with
+    jitter_buffer_get()/jitter_buffer_get_another() or discarded with
+    jitter_buffer_reset()/jitter_buffer_destroy(). When a packet is
+    retrieved, the same pointer the caller passed in is handed back
+    (zero-copy); freeing the buffer while the jitter buffer still holds the
+    packet results in a dangling pointer being returned later. */
 struct _JitterBufferPacket {
-   char        *data;       /**< Data bytes contained in the packet */
+   char        *data;       /**< Data bytes contained in the packet (owned by the caller, never copied or freed by the jitter buffer -- see struct documentation) */
    spx_uint32_t len;        /**< Length of the packet in bytes */
    spx_uint32_t timestamp;  /**< Timestamp for the packet */
    spx_uint32_t span;       /**< Time covered by the packet (same units as timestamp) */
    spx_uint16_t sequence;   /**< RTP Sequence number if available (0 otherwise) */
-   spx_uint32_t user_data;  /**< Put whatever data you like here (it's ignored by the jitter buffer) */
+   spx_uintptr_t user_data; /**< Put whatever data you like here (it's copied verbatim by the jitter buffer and otherwise ignored). Wide enough to hold a pointer: same width as void* on the target platform. Initialise to 0 if unused. */
 };
 
 /** Packet has been retrieved */
@@ -89,10 +109,12 @@ struct _JitterBufferPacket {
 /** Included because of an early misspelling (will remove in next release) */
 #define JITTER_BUFFER_GET_AVALIABLE_COUNT 3
 
-/** Assign a function to destroy unused packet. When setting that, the jitter
-    buffer no longer copies packet data. */
+/** Deprecated: assign a function to destroy unused packets. The jitter
+    buffer never takes ownership of packet data, so this callback is
+    accepted for backward compatibility only and is NEVER invoked. The
+    caller is always responsible for freeing packet data. */
 #define JITTER_BUFFER_SET_DESTROY_CALLBACK 4
-/**  */
+/** Deprecated: reads back the pointer set with JITTER_BUFFER_SET_DESTROY_CALLBACK */
 #define JITTER_BUFFER_GET_DESTROY_CALLBACK 5
 
 /** Tell the jitter buffer to only adjust the delay in multiples of the step parameter provided */
@@ -123,26 +145,36 @@ struct _JitterBufferPacket {
  */
 JitterBuffer *jitter_buffer_init(int step_size);
 
-/** Restores jitter buffer to its original state
+/** Restores jitter buffer to its original state. Any buffered packets are
+ * discarded; their data buffers are NOT freed (the caller owns them, see
+ * JitterBufferPacket).
  *
  * @param jitter Jitter buffer state
  */
 void jitter_buffer_reset(JitterBuffer *jitter);
 
-/** Destroys jitter buffer
+/** Destroys jitter buffer. Any buffered packets are discarded; their data
+ * buffers are NOT freed (the caller owns them, see JitterBufferPacket).
  *
  * @param jitter Jitter buffer state
  */
 void jitter_buffer_destroy(JitterBuffer *jitter);
 
-/** Put one packet into the jitter buffer
+/** Put one packet into the jitter buffer. The packet's data buffer is NOT
+ * copied: the jitter buffer only stores the pointer. The caller must keep
+ * the buffer valid until the packet is retrieved or discarded (see
+ * JitterBufferPacket).
  *
  * @param jitter Jitter buffer state
  * @param packet Incoming packet
 */
 void jitter_buffer_put(JitterBuffer *jitter, const JitterBufferPacket *packet);
 
-/** Get one packet from the jitter buffer
+/** Get one packet from the jitter buffer. On JITTER_BUFFER_OK, packet->data
+ * is set to the same pointer that was passed to jitter_buffer_put()
+ * (zero-copy) and packet->len to the stored length; any buffer/length the
+ * caller placed in packet beforehand is ignored. The data buffer remains
+ * owned by the caller.
  *
  * @param jitter Jitter buffer state
  * @param packet Returned packet
@@ -153,6 +185,7 @@ int jitter_buffer_get(JitterBuffer *jitter, JitterBufferPacket *packet, spx_int3
 
 /** Used right after jitter_buffer_get() to obtain another packet that would have the same timestamp.
  * This is mainly useful for media where a single "frame" can be split into several packets.
+ * The data pointer is handed back zero-copy, exactly like jitter_buffer_get().
  *
  * @param jitter Jitter buffer state
  * @param packet Returned packet

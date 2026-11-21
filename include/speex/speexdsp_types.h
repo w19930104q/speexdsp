@@ -26,26 +26,36 @@
 
 #  if defined(__CYGWIN__)
 #    include <_G_config.h>
+#    include <stdint.h>
      typedef _G_int32_t spx_int32_t;
      typedef _G_uint32_t spx_uint32_t;
      typedef _G_int16_t spx_int16_t;
      typedef _G_uint16_t spx_uint16_t;
+     typedef uintptr_t spx_uintptr_t;
 #  elif defined(__MINGW32__)
+#    include <stdint.h>
      typedef short spx_int16_t;
      typedef unsigned short spx_uint16_t;
      typedef int spx_int32_t;
      typedef unsigned int spx_uint32_t;
+     typedef uintptr_t spx_uintptr_t;
 #  elif defined(__MWERKS__)
      typedef int spx_int32_t;
      typedef unsigned int spx_uint32_t;
      typedef short spx_int16_t;
      typedef unsigned short spx_uint16_t;
+     typedef unsigned int spx_uintptr_t;
 #  else
      /* MSVC/Borland */
      typedef __int32 spx_int32_t;
      typedef unsigned __int32 spx_uint32_t;
      typedef __int16 spx_int16_t;
      typedef unsigned __int16 spx_uint16_t;
+#    ifdef _WIN64
+     typedef unsigned __int64 spx_uintptr_t;
+#    else
+     typedef unsigned int spx_uintptr_t;
+#    endif
 #  endif
 
 #elif defined(__MACOS__)
@@ -55,14 +65,17 @@
    typedef UInt16 spx_uint16_t;
    typedef SInt32 spx_int32_t;
    typedef UInt32 spx_uint32_t;
+   typedef UInt32 spx_uintptr_t;
 
 #elif (defined(__APPLE__) && defined(__MACH__)) /* MacOS X Framework build */
 
 #  include <sys/types.h>
+#  include <stdint.h>
    typedef int16_t spx_int16_t;
    typedef u_int16_t spx_uint16_t;
    typedef int32_t spx_int32_t;
    typedef u_int32_t spx_uint32_t;
+   typedef uintptr_t spx_uintptr_t;
 
 #elif defined(__BEOS__)
 
@@ -72,6 +85,7 @@
    typedef u_int16_t spx_uint16_t;
    typedef int32_t spx_int32_t;
    typedef u_int32_t spx_uint32_t;
+   typedef uintptr_t spx_uintptr_t;
 
 #elif defined (__EMX__)
 
@@ -80,6 +94,7 @@
    typedef unsigned short spx_uint16_t;
    typedef int spx_int32_t;
    typedef unsigned int spx_uint32_t;
+   typedef unsigned int spx_uintptr_t;
 
 #elif defined (DJGPP)
 
@@ -87,6 +102,7 @@
    typedef short spx_int16_t;
    typedef int spx_int32_t;
    typedef unsigned int spx_uint32_t;
+   typedef unsigned int spx_uintptr_t;
 
 #elif defined(R5900)
 
@@ -94,6 +110,7 @@
    typedef int spx_int32_t;
    typedef unsigned spx_uint32_t;
    typedef short spx_int16_t;
+   typedef unsigned int spx_uintptr_t;
 
 #elif defined(__SYMBIAN32__)
 
@@ -102,6 +119,7 @@
    typedef unsigned short spx_uint16_t;
    typedef signed int spx_int32_t;
    typedef unsigned int spx_uint32_t;
+   typedef unsigned int spx_uintptr_t;
 
 #elif defined(CONFIG_TI_C54X) || defined (CONFIG_TI_C55X)
 
@@ -109,6 +127,7 @@
    typedef unsigned short spx_uint16_t;
    typedef long spx_int32_t;
    typedef unsigned long spx_uint32_t;
+   typedef unsigned long spx_uintptr_t;
 
 #elif defined(CONFIG_TI_C6X)
 
@@ -116,6 +135,7 @@
    typedef unsigned short spx_uint16_t;
    typedef int spx_int32_t;
    typedef unsigned int spx_uint32_t;
+   typedef unsigned int spx_uintptr_t;
 
 #else
 

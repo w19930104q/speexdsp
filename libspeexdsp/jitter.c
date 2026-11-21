@@ -143,7 +143,7 @@ struct JitterBuffer_ {
    JitterBufferPacket packets[SPEEX_JITTER_MAX_BUFFER_SIZE];   /**< Packets stored in the buffer */
    spx_uint32_t arrival[SPEEX_JITTER_MAX_BUFFER_SIZE];         /**< Packet arrival time (0 means it was late, even though it's a valid timestamp) */
 
-   void (*destroy) (void *);                                   /**< Callback for destroying a packet */
+   void (*destroy) (void *);                                   /**< Deprecated: stored for backward compatibility, never invoked (the jitter buffer never owns packet data) */
 
    spx_int32_t delay_step;                                     /**< Size of the steps when adjusting buffering (timestamp units) */
    spx_int32_t concealment_size;                               /**< Size of the packet loss concealment "units" */
@@ -295,17 +295,10 @@ EXPORT JitterBuffer *jitter_buffer_init(int step_size)
 EXPORT void jitter_buffer_reset(JitterBuffer *jitter)
 {
    int i;
+   /* The jitter buffer does not own packet data: just drop the references.
+      The caller is responsible for freeing the buffers. */
    for (i=0;i<SPEEX_JITTER_MAX_BUFFER_SIZE;i++)
-   {
-      if (jitter->packets[i].data)
-      {
-         if (jitter->destroy)
-            jitter->destroy(jitter->packets[i].data);
-         else
-            speex_free(jitter->packets[i].data);
-         jitter->packets[i].data = NULL;
-      }
-   }
+      jitter->packets[i].data = NULL;
    /* Timestamp is actually undefined at this point */
    jitter->pointer_timestamp = 0;
    jitter->next_stop = 0;
@@ -378,10 +371,7 @@ EXPORT void jitter_buffer_put(JitterBuffer *jitter, const JitterBufferPacket *pa
          if (jitter->packets[i].data && LE32(jitter->packets[i].timestamp + jitter->packets[i].span, jitter->pointer_timestamp))
          {
             /*fprintf (stderr, "cleaned (not played)\n");*/
-            if (jitter->destroy)
-               jitter->destroy(jitter->packets[i].data);
-            else
-               speex_free(jitter->packets[i].data);
+            /* The caller owns the data buffer: just drop the reference */
             jitter->packets[i].data = NULL;
          }
       }
@@ -428,23 +418,15 @@ EXPORT void jitter_buffer_put(JitterBuffer *jitter, const JitterBufferPacket *pa
                i=j;
             }
          }
-         if (jitter->destroy)
-            jitter->destroy(jitter->packets[i].data);
-         else
-            speex_free(jitter->packets[i].data);
+         /* The caller owns the data buffer: just drop the reference */
          jitter->packets[i].data=NULL;
          /*fprintf (stderr, "Buffer is full, discarding earliest frame %d (currently at %d)\n", timestamp, jitter->pointer_timestamp);*/
       }
 
-      /* Copy packet in buffer */
-      if (jitter->destroy)
-      {
-         jitter->packets[i].data = packet->data;
-      } else {
-         jitter->packets[i].data=(char*)speex_alloc(packet->len);
-         for (j=0;j<packet->len;j++)
-            jitter->packets[i].data[j]=packet->data[j];
-      }
+      /* Copy packet in buffer. The data itself is NOT copied: only the
+         pointer is stored. The caller keeps ownership of the buffer and
+         must keep it valid until the packet is retrieved or discarded. */
+      jitter->packets[i].data = packet->data;
       jitter->packets[i].timestamp=packet->timestamp;
       jitter->packets[i].span=packet->span;
       jitter->packets[i].len=packet->len;
@@ -463,7 +445,6 @@ EXPORT void jitter_buffer_put(JitterBuffer *jitter, const JitterBufferPacket *pa
 EXPORT int jitter_buffer_get(JitterBuffer *jitter, JitterBufferPacket *packet, spx_int32_t desired_span, spx_int32_t *start_offset)
 {
    int i;
-   unsigned int j;
    spx_int16_t opt;
 
    if (start_offset != NULL)
@@ -587,23 +568,12 @@ EXPORT int jitter_buffer_get(JitterBuffer *jitter, JitterBufferPacket *packet, s
       }
 
 
-      /* Copy packet */
-      if (jitter->destroy)
-      {
-         packet->data = jitter->packets[i].data;
-         packet->len = jitter->packets[i].len;
-      } else {
-         if (jitter->packets[i].len > packet->len)
-         {
-            speex_warning_int("jitter_buffer_get(): packet too large to fit. Size is", jitter->packets[i].len);
-         } else {
-            packet->len = jitter->packets[i].len;
-         }
-         for (j=0;j<packet->len;j++)
-            packet->data[j] = jitter->packets[i].data[j];
-         /* Remove packet */
-         speex_free(jitter->packets[i].data);
-      }
+      /* Hand the packet back zero-copy: return the same pointer the
+         caller passed to jitter_buffer_put(). The caller still owns
+         the data buffer. */
+      packet->data = jitter->packets[i].data;
+      packet->len = jitter->packets[i].len;
+      /* Remove packet */
       jitter->packets[i].data = NULL;
       /* Set timestamp and span (if requested) */
       offset = (spx_int32_t)jitter->packets[i].timestamp-(spx_int32_t)jitter->pointer_timestamp;
@@ -675,7 +645,7 @@ EXPORT int jitter_buffer_get(JitterBuffer *jitter, JitterBufferPacket *packet, s
 
 EXPORT int jitter_buffer_get_another(JitterBuffer *jitter, JitterBufferPacket *packet)
 {
-   int i, j;
+   int i;
    for (i=0;i<SPEEX_JITTER_MAX_BUFFER_SIZE;i++)
    {
       if (jitter->packets[i].data && jitter->packets[i].timestamp==jitter->last_returned_timestamp)
@@ -683,17 +653,10 @@ EXPORT int jitter_buffer_get_another(JitterBuffer *jitter, JitterBufferPacket *p
    }
    if (i!=SPEEX_JITTER_MAX_BUFFER_SIZE)
    {
-      /* Copy packet */
+      /* Hand the packet back zero-copy (caller still owns the data) */
+      packet->data = jitter->packets[i].data;
       packet->len = jitter->packets[i].len;
-      if (jitter->destroy)
-      {
-         packet->data = jitter->packets[i].data;
-      } else {
-         for (j=0;j<packet->len;j++)
-            packet->data[j] = jitter->packets[i].data[j];
-         /* Remove packet */
-         speex_free(jitter->packets[i].data);
-      }
+      /* Remove packet */
       jitter->packets[i].data = NULL;
       packet->timestamp = jitter->packets[i].timestamp;
       packet->span = jitter->packets[i].span;
@@ -799,6 +762,9 @@ EXPORT int jitter_buffer_ctl(JitterBuffer *jitter, int request, void *ptr)
          *(spx_int32_t*)ptr = count;
          break;
       case JITTER_BUFFER_SET_DESTROY_CALLBACK:
+         /* Deprecated: the jitter buffer never owns packet data, so the
+            callback is only stored (for JITTER_BUFFER_GET_DESTROY_CALLBACK)
+            and is never invoked. */
          jitter->destroy = (void (*) (void *))ptr;
          break;
       case JITTER_BUFFER_GET_DESTROY_CALLBACK:

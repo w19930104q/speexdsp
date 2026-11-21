@@ -7,6 +7,6 @@ typedef @SIZE16@ spx_int16_t;
 typedef @USIZE16@ spx_uint16_t;
 typedef @SIZE32@ spx_int32_t;
 typedef @USIZE32@ spx_uint32_t;
+typedef @USIZEPTR@ spx_uintptr_t;
 
 #endif
-

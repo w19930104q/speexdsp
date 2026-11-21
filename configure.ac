@@ -259,6 +259,8 @@ AC_CHECK_SIZEOF([u_int32_t])
 AC_CHECK_SIZEOF([short])
 AC_CHECK_SIZEOF([int])
 AC_CHECK_SIZEOF([long])
+AC_CHECK_SIZEOF([long long])
+AC_CHECK_SIZEOF([void*])
 
 AS_IF([test "$has_char16" = "yes"],
   [
@@ -297,15 +299,24 @@ case $SIZEOF32 in
     $ac_cv_sizeof_long) USIZE32="unsigned long";;
 esac
 
+case $ac_cv_sizeof_voidp in
+    $ac_cv_sizeof_short) USIZEPTR="unsigned short";;
+    $ac_cv_sizeof_int) USIZEPTR="unsigned int";;
+    $ac_cv_sizeof_long) USIZEPTR="unsigned long";;
+    $ac_cv_sizeof_long_long) USIZEPTR="unsigned long long";;
+esac
+
 AS_IF([test -z "$SIZE16"],[AC_MSG_ERROR([No 16 bit type found on this platform!])])
 AS_IF([test -z "$SIZE32"],[AC_MSG_ERROR([No 32 bit type found on this platform!])])
 AS_IF([test -z "$USIZE16"],[AC_MSG_ERROR([No unsigned 16 bit type found on this platform!])])
 AS_IF([test -z "$USIZE32"],[AC_MSG_ERROR([No unsigned 32 bit type found on this platform!])])
+AS_IF([test -z "$USIZEPTR"],[AC_MSG_ERROR([No unsigned pointer-sized type found on this platform!])])
 
 AC_SUBST([SIZE16])
 AC_SUBST([USIZE16])
 AC_SUBST([SIZE32])
 AC_SUBST([USIZE32])
+AC_SUBST([USIZEPTR])
 
 AS_IF([test "$ac_cv_header_stdint_h" = "yes"],    [INCLUDE_STDINT="#include <stdint.h>"],
       [test "$ac_cv_header_inttypes_h" = "yes"],  [INCLUDE_STDINT="#include <inttypes.h>"],
