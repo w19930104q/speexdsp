@@ -604,63 +604,75 @@ static int multiply_frac(spx_uint32_t *result, spx_uint32_t value, spx_uint32_t 
 
 static int update_filter(SpeexResamplerState *st)
 {
-   spx_uint32_t old_length = st->filt_len;
-   spx_uint32_t old_alloc_size = st->mem_alloc_size;
+   /* Scalar filter parameters are computed into local variables and only
+      committed once every step has succeeded, so a failure leaves them (and
+      the resampler function pointer) untouched. Buffer (re)allocations, on
+      the other hand, are committed immediately on success: buffers only ever
+      grow, so a state holding a larger buffer together with the still-valid
+      old parameters remains fully usable even if a later step fails. This
+      also avoids the realloc-move-then-fail dangling pointer problem. */
+   const spx_uint32_t old_length = st->filt_len;
+   const spx_uint32_t old_alloc_size = st->mem_alloc_size;
+   spx_uint32_t int_advance;
+   spx_uint32_t frac_advance;
+   spx_uint32_t oversample;
+   spx_uint32_t filt_len;
+   float cutoff;
    int use_direct;
    spx_uint32_t min_sinc_table_length;
    spx_uint32_t min_alloc_size;
 
-   st->int_advance = st->num_rate/st->den_rate;
-   st->frac_advance = st->num_rate%st->den_rate;
-   st->oversample = quality_map[st->quality].oversample;
-   st->filt_len = quality_map[st->quality].base_length;
+   int_advance = st->num_rate/st->den_rate;
+   frac_advance = st->num_rate%st->den_rate;
+   oversample = quality_map[st->quality].oversample;
+   filt_len = quality_map[st->quality].base_length;
 
    if (st->num_rate > st->den_rate)
    {
       /* down-sampling */
-      st->cutoff = quality_map[st->quality].downsample_bandwidth * st->den_rate / st->num_rate;
-      if (multiply_frac(&st->filt_len,st->filt_len,st->num_rate,st->den_rate) != RESAMPLER_ERR_SUCCESS)
-         goto fail;
+      cutoff = quality_map[st->quality].downsample_bandwidth * st->den_rate / st->num_rate;
+      if (multiply_frac(&filt_len, filt_len, st->num_rate, st->den_rate) != RESAMPLER_ERR_SUCCESS)
+         return RESAMPLER_ERR_OVERFLOW;
       /* Round up to make sure we have a multiple of 8 for SSE */
-      st->filt_len = ((st->filt_len-1)&(~0x7))+8;
+      filt_len = ((filt_len-1)&(~0x7))+8;
       if (2*st->den_rate < st->num_rate)
-         st->oversample >>= 1;
+         oversample >>= 1;
       if (4*st->den_rate < st->num_rate)
-         st->oversample >>= 1;
+         oversample >>= 1;
       if (8*st->den_rate < st->num_rate)
-         st->oversample >>= 1;
+         oversample >>= 1;
       if (16*st->den_rate < st->num_rate)
-         st->oversample >>= 1;
-      if (st->oversample < 1)
-         st->oversample = 1;
+         oversample >>= 1;
+      if (oversample < 1)
+         oversample = 1;
    } else {
       /* up-sampling */
-      st->cutoff = quality_map[st->quality].upsample_bandwidth;
+      cutoff = quality_map[st->quality].upsample_bandwidth;
    }
 
 #ifdef RESAMPLE_FULL_SINC_TABLE
    use_direct = 1;
-   if (INT_MAX/sizeof(spx_word16_t)/st->den_rate < st->filt_len)
-      goto fail;
+   if (INT_MAX/sizeof(spx_word16_t)/st->den_rate < filt_len)
+      return RESAMPLER_ERR_OVERFLOW;
 #else
    /* Choose the resampling type that requires the least amount of memory */
-   use_direct = st->filt_len*st->den_rate <= st->filt_len*st->oversample+8
-                && INT_MAX/sizeof(spx_word16_t)/st->den_rate >= st->filt_len;
+   use_direct = filt_len*st->den_rate <= filt_len*oversample+8
+                && INT_MAX/sizeof(spx_word16_t)/st->den_rate >= filt_len;
 #endif
    if (use_direct)
    {
-      min_sinc_table_length = st->filt_len*st->den_rate;
+      min_sinc_table_length = filt_len*st->den_rate;
    } else {
-      if ((INT_MAX/sizeof(spx_word16_t)-8)/st->oversample < st->filt_len)
-         goto fail;
+      if ((INT_MAX/sizeof(spx_word16_t)-8)/oversample < filt_len)
+         return RESAMPLER_ERR_OVERFLOW;
 
-      min_sinc_table_length = st->filt_len*st->oversample+8;
+      min_sinc_table_length = filt_len*oversample+8;
    }
    if (st->sinc_table_length < min_sinc_table_length)
    {
       spx_word16_t *sinc_table = (spx_word16_t *)speex_realloc(st->sinc_table,min_sinc_table_length*sizeof(spx_word16_t));
       if (!sinc_table)
-         goto fail;
+         return RESAMPLER_ERR_ALLOC_FAILED;
 
       st->sinc_table = sinc_table;
       st->sinc_table_length = min_sinc_table_length;
@@ -671,11 +683,45 @@ static int update_filter(SpeexResamplerState *st)
       for (i=0;i<st->den_rate;i++)
       {
          spx_int32_t j;
-         for (j=0;j<st->filt_len;j++)
+         for (j=0;j<filt_len;j++)
          {
-            st->sinc_table[i*st->filt_len+j] = sinc(st->cutoff,((j-(spx_int32_t)st->filt_len/2+1)-((float)i)/st->den_rate), st->filt_len, quality_map[st->quality].window_func);
+            st->sinc_table[i*filt_len+j] = sinc(cutoff,((j-(spx_int32_t)filt_len/2+1)-((float)i)/st->den_rate), filt_len, quality_map[st->quality].window_func);
          }
       }
+   } else {
+      spx_int32_t i;
+      for (i=-4;i<(spx_int32_t)(oversample*filt_len+4);i++)
+         st->sinc_table[i+4] = sinc(cutoff,(i/(float)oversample - filt_len/2), filt_len, quality_map[st->quality].window_func);
+   }
+
+   /* Here's the place where we update the filter memory to take into account
+      the change in filter length. It's probably the messiest part of the code
+      due to handling of lots of corner cases. */
+
+   /* Adding buffer_size to filt_len won't overflow here because filt_len
+      could be multiplied by sizeof(spx_word16_t) above. */
+   min_alloc_size = filt_len-1 + st->buffer_size;
+   if (min_alloc_size > st->mem_alloc_size)
+   {
+      spx_word16_t *mem;
+      if (INT_MAX/sizeof(spx_word16_t)/st->nb_channels < min_alloc_size)
+          return RESAMPLER_ERR_OVERFLOW;
+      else if (!(mem = (spx_word16_t*)speex_realloc(st->mem, st->nb_channels*min_alloc_size * sizeof(*mem))))
+          return RESAMPLER_ERR_ALLOC_FAILED;
+
+      st->mem = mem;
+      st->mem_alloc_size = min_alloc_size;
+   }
+
+   /* All checks and allocations succeeded: commit the new scalar parameters
+      and resampler function pointer. From here on the function cannot fail. */
+   st->int_advance = int_advance;
+   st->frac_advance = frac_advance;
+   st->oversample = oversample;
+   st->filt_len = filt_len;
+   st->cutoff = cutoff;
+   if (use_direct)
+   {
 #ifdef FIXED_POINT
       st->resampler_ptr = resampler_basic_direct_single;
 #else
@@ -686,9 +732,6 @@ static int update_filter(SpeexResamplerState *st)
 #endif
       /*fprintf (stderr, "resampler uses direct sinc table and normalised cutoff %f\n", cutoff);*/
    } else {
-      spx_int32_t i;
-      for (i=-4;i<(spx_int32_t)(st->oversample*st->filt_len+4);i++)
-         st->sinc_table[i+4] = sinc(st->cutoff,(i/(float)st->oversample - st->filt_len/2), st->filt_len, quality_map[st->quality].window_func);
 #ifdef FIXED_POINT
       st->resampler_ptr = resampler_basic_interpolate_single;
 #else
@@ -700,24 +743,6 @@ static int update_filter(SpeexResamplerState *st)
       /*fprintf (stderr, "resampler uses interpolated sinc table and normalised cutoff %f\n", cutoff);*/
    }
 
-   /* Here's the place where we update the filter memory to take into account
-      the change in filter length. It's probably the messiest part of the code
-      due to handling of lots of corner cases. */
-
-   /* Adding buffer_size to filt_len won't overflow here because filt_len
-      could be multiplied by sizeof(spx_word16_t) above. */
-   min_alloc_size = st->filt_len-1 + st->buffer_size;
-   if (min_alloc_size > st->mem_alloc_size)
-   {
-      spx_word16_t *mem;
-      if (INT_MAX/sizeof(spx_word16_t)/st->nb_channels < min_alloc_size)
-          goto fail;
-      else if (!(mem = (spx_word16_t*)speex_realloc(st->mem, st->nb_channels*min_alloc_size * sizeof(*mem))))
-          goto fail;
-
-      st->mem = mem;
-      st->mem_alloc_size = min_alloc_size;
-   }
    if (!st->started)
    {
       spx_uint32_t i;
@@ -784,14 +809,6 @@ static int update_filter(SpeexResamplerState *st)
       }
    }
    return RESAMPLER_ERR_SUCCESS;
-
-fail:
-   st->resampler_ptr = resampler_basic_zero;
-   /* st->mem may still contain consumed input samples for the filter.
-      Restore filt_len so that filt_len - 1 still points to the position after
-      the last of these samples. */
-   st->filt_len = old_length;
-   return RESAMPLER_ERR_ALLOC_FAILED;
 }
 
 EXPORT SpeexResamplerState *speex_resampler_init(spx_uint32_t nb_channels, spx_uint32_t in_rate, spx_uint32_t out_rate, int quality, int *err)
@@ -804,7 +821,7 @@ EXPORT SpeexResamplerState *speex_resampler_init_frac(spx_uint32_t nb_channels, 
    SpeexResamplerState *st;
    int filter_err;
 
-   if (nb_channels == 0 || ratio_num == 0 || ratio_den == 0 || quality > 10 || quality < 0)
+   if (nb_channels == 0 || ratio_num == 0 || ratio_den == 0 || in_rate == 0 || out_rate == 0 || quality > 10 || quality < 0)
    {
       if (err)
          *err = RESAMPLER_ERR_INVALID_ARG;
@@ -1110,40 +1127,97 @@ static inline spx_uint32_t compute_gcd(spx_uint32_t a, spx_uint32_t b)
 EXPORT int speex_resampler_set_rate_frac(SpeexResamplerState *st, spx_uint32_t ratio_num, spx_uint32_t ratio_den, spx_uint32_t in_rate, spx_uint32_t out_rate)
 {
    spx_uint32_t fact;
-   spx_uint32_t old_den;
+   spx_uint32_t old_in_rate, old_out_rate, old_num_rate, old_den;
+   spx_uint32_t new_num_rate, new_den_rate;
+   spx_uint32_t *scratch = NULL;
    spx_uint32_t i;
 
-   if (ratio_num == 0 || ratio_den == 0)
+   if (st == NULL)
+      return RESAMPLER_ERR_BAD_STATE;
+
+   /* A zero rate or ratio would lead to division by zero once the state is
+      used, so reject all of them up front. */
+   if (ratio_num == 0 || ratio_den == 0 || in_rate == 0 || out_rate == 0)
       return RESAMPLER_ERR_INVALID_ARG;
 
    if (st->in_rate == in_rate && st->out_rate == out_rate && st->num_rate == ratio_num && st->den_rate == ratio_den)
       return RESAMPLER_ERR_SUCCESS;
 
-   old_den = st->den_rate;
-   st->in_rate = in_rate;
-   st->out_rate = out_rate;
-   st->num_rate = ratio_num;
-   st->den_rate = ratio_den;
+   /* Reduce the ratio in local variables first. The state must not change
+      until every step below has succeeded. */
+   new_num_rate = ratio_num;
+   new_den_rate = ratio_den;
+   fact = compute_gcd(new_num_rate, new_den_rate);
+   new_num_rate /= fact;
+   new_den_rate /= fact;
 
-   fact = compute_gcd(st->num_rate, st->den_rate);
-
-   st->num_rate /= fact;
-   st->den_rate /= fact;
+   old_in_rate  = st->in_rate;
+   old_out_rate = st->out_rate;
+   old_num_rate = st->num_rate;
+   old_den      = st->den_rate;
 
    if (old_den > 0)
    {
+      /* One scratch block: first nb_channels entries keep a copy of the old
+         per-channel phases (needed for rollback), the next nb_channels entries
+         hold the newly converted phases. Nothing is written into the state
+         until all conversions have succeeded. */
+      scratch = (spx_uint32_t *)speex_alloc(2*st->nb_channels*sizeof(spx_uint32_t));
+      if (!scratch)
+         return RESAMPLER_ERR_ALLOC_FAILED;
       for (i=0;i<st->nb_channels;i++)
       {
-         if (multiply_frac(&st->samp_frac_num[i],st->samp_frac_num[i],st->den_rate,old_den) != RESAMPLER_ERR_SUCCESS)
+         scratch[i] = st->samp_frac_num[i];
+         if (multiply_frac(&scratch[st->nb_channels+i], st->samp_frac_num[i], new_den_rate, old_den) != RESAMPLER_ERR_SUCCESS)
+         {
+            speex_free(scratch);
             return RESAMPLER_ERR_OVERFLOW;
+         }
          /* Safety net */
-         if (st->samp_frac_num[i] >= st->den_rate)
-            st->samp_frac_num[i] = st->den_rate-1;
+         if (scratch[st->nb_channels+i] >= new_den_rate)
+            scratch[st->nb_channels+i] = new_den_rate-1;
       }
    }
 
    if (st->initialised)
-      return update_filter(st);
+   {
+      /* Commit the new rate/ratio/phases, then rebuild the filter.
+         update_filter() either succeeds or leaves every field it manages
+         untouched; on failure we therefore only have to undo the values
+         committed here. */
+      st->in_rate = in_rate;
+      st->out_rate = out_rate;
+      st->num_rate = new_num_rate;
+      st->den_rate = new_den_rate;
+      if (scratch)
+         for (i=0;i<st->nb_channels;i++)
+            st->samp_frac_num[i] = scratch[st->nb_channels+i];
+
+      int rc = update_filter(st);
+      if (rc != RESAMPLER_ERR_SUCCESS)
+      {
+         /* Full rollback: state is identical to what it was on entry. */
+         st->in_rate = old_in_rate;
+         st->out_rate = old_out_rate;
+         st->num_rate = old_num_rate;
+         st->den_rate = old_den;
+         if (scratch)
+            for (i=0;i<st->nb_channels;i++)
+               st->samp_frac_num[i] = scratch[i];
+         speex_free(scratch);
+         return rc;
+      }
+   } else {
+      /* Initialisation path: no filter to rebuild yet. */
+      st->in_rate = in_rate;
+      st->out_rate = out_rate;
+      st->num_rate = new_num_rate;
+      st->den_rate = new_den_rate;
+      if (scratch)
+         for (i=0;i<st->nb_channels;i++)
+            st->samp_frac_num[i] = scratch[st->nb_channels+i];
+   }
+   speex_free(scratch);
    return RESAMPLER_ERR_SUCCESS;
 }
 
@@ -1155,13 +1229,24 @@ EXPORT void speex_resampler_get_ratio(SpeexResamplerState *st, spx_uint32_t *rat
 
 EXPORT int speex_resampler_set_quality(SpeexResamplerState *st, int quality)
 {
+   int old_quality;
+   int rc;
+
    if (quality > 10 || quality < 0)
       return RESAMPLER_ERR_INVALID_ARG;
    if (st->quality == quality)
       return RESAMPLER_ERR_SUCCESS;
+   old_quality = st->quality;
    st->quality = quality;
    if (st->initialised)
-      return update_filter(st);
+   {
+      /* update_filter() leaves every field it manages untouched on failure;
+         restore the quality so the state stays consistent with the filter. */
+      rc = update_filter(st);
+      if (rc != RESAMPLER_ERR_SUCCESS)
+         st->quality = old_quality;
+      return rc;
+   }
    return RESAMPLER_ERR_SUCCESS;
 }
 
@@ -1236,6 +1321,8 @@ EXPORT const char *speex_resampler_strerror(int err)
          return "Invalid argument.";
       case RESAMPLER_ERR_PTR_OVERLAP:
          return "Input and output buffers overlap.";
+      case RESAMPLER_ERR_OVERFLOW:
+         return "Overflow error.";
       default:
          return "Unknown error. Bad error code or strange version mismatch.";
    }
